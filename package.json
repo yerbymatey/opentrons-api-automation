@@ -20,6 +20,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
+    "axios": "^1.6.0",
     "nats": "^2.19.0"
   },
   "engines": {
