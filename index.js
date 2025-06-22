@@ -221,26 +221,15 @@ class OpentronsMCP {
             }
           },
           {
-            name: "nats_listen_error_reception",
-            description: "Listen for error messages on error-reception channel and auto-fix protocols",
+            name: "poll_error_endpoint_and_fix",
+            description: "Poll HTTP endpoint for errors and automatically fix protocols when detected",
             inputSchema: {
               type: "object",
               properties: {
-                timeout: { type: "number", default: 30000, description: "Timeout in milliseconds" }
+                directory: { type: "string", default: "", description: "Directory path for error file (optional)" },
+                timeout: { type: "number", default: 3000, description: "Timeout in seconds" },
+                original_protocol_path: { type: "string", default: "/Users/gene/Developer/failed-protocol-5.py", description: "Path to original protocol file" }
               }
-            }
-          },
-          {
-            name: "call_protocol_fixer",
-            description: "Fix protocol by continuing from last viable step",
-            inputSchema: {
-              type: "object",
-              properties: {
-                protocol_file_path: { type: "string", description: "Path to the original protocol file" },
-                error_context: { type: "string", description: "Plain text error context from nats listener" },
-                fixer_script_path: { type: "string", default: "./protocol_fixer.py", description: "Path to Python fixer script" }
-              },
-              required: ["protocol_file_path", "error_context"]
             }
           }
         ]
@@ -277,10 +266,8 @@ class OpentronsMCP {
           return this.controlLights(args);
         case "home_robot":
           return this.homeRobot(args);
-        case "nats_listen_error_reception":
-          return this.natsListenErrorReception(args);
-        case "call_protocol_fixer":
-          return this.callProtocolFixer(args);
+        case "poll_error_endpoint_and_fix":
+          return this.pollErrorEndpointAndFix(args);
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -2070,91 +2057,140 @@ class OpentronsMCP {
     }
   }
 
-  async natsListenErrorReception(args) {
-    const { timeout = 30000 } = args;
+  async pollErrorEndpointAndFix(args) {
+    const { directory = "", timeout = 3000, original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
     
     try {
-      const { exec } = await import('child_process');
-      const { promisify } = await import('util');
-      const execAsync = promisify(exec);
+      const baseUrl = 'http://98.42.130.34:8080';
+      const directoryUrl = directory ? `${baseUrl}/${directory}/` : baseUrl;
       
-      const listenerScript = `
-const { connect } = require('nats');
-async function listen() {
-  const nc = await connect();
-  const handler = async (msg) => {
-    console.log(msg.data.toString());
-    process.exit(0);
-  };
-  await nc.subscribe('error-reception', handler);
-  setTimeout(() => { console.error('TIMEOUT'); process.exit(1); }, ${timeout});
-}
-listen().catch(console.error);
-`;
-
-      const { stdout, stderr } = await execAsync(`node -e "${listenerScript}"`);
+      const startTime = Date.now();
+      let knownFiles = new Set();
       
-      if (stderr.includes('TIMEOUT')) {
-        return {
-          content: [{
-            type: "text",
-            text: `⏱️ **No error messages received** within ${timeout/1000}s`
-          }]
-        };
+      // Get initial file list
+      try {
+        const initialResponse = await fetch(directoryUrl);
+        if (initialResponse.ok) {
+          const initialHtml = await initialResponse.text();
+          const initialFiles = this.parseDirectoryListing(initialHtml);
+          knownFiles = new Set(initialFiles);
+          console.error(`🔍 Monitoring ${directoryUrl} - initial files: ${knownFiles.size}`);
+        }
+      } catch (error) {
+        console.error(`Starting fresh - no initial directory found`);
       }
       
-      const diagnostics_raw = stdout.trim();
-      
-      // extract robot info
-      const robotIpMatch = diagnostics_raw.match(/"robot_ip":\s*"([^"]+)"/);
-      const runIdMatch = diagnostics_raw.match(/"run_id":\s*"([^"]+)"/);
-      
-      const robot_ip = robotIpMatch?.[1];
-      const run_id = runIdMatch?.[1];
-      
-      let runInfo = '';
-      let currentStepInfo = '';
-      
-      if (robot_ip && run_id) {
+      // Poll for new files
+      while ((Date.now() - startTime) < timeout * 1000) {
         try {
-          // get command info before stopping
-          const { exec: exec2 } = await import('child_process');
-          const { promisify: promisify2 } = await import('util');
-          const execAsync2 = promisify2(exec2);
-          
-          const cmdResponse = await execAsync2(`curl -s -H "Opentrons-Version: *" "http://${robot_ip}:31950/runs/${run_id}/commands?pageLength=10"`);
-          const cmdData = JSON.parse(cmdResponse.stdout);
-          
-          if (cmdData.data && cmdData.data.length > 0) {
-            const currentCmd = cmdData.data[cmdData.data.length - 1];
-            currentStepInfo = `Command: ${currentCmd.commandType} (${currentCmd.status})\n`;
-            currentStepInfo += `Step Index: ${cmdData.data.length - 1}\n`;
-            if (currentCmd.params) {
-              currentStepInfo += `Parameters: ${JSON.stringify(currentCmd.params)}\n`;
+          const response = await fetch(directoryUrl);
+          if (response.ok) {
+            const html = await response.text();
+            const currentFiles = this.parseDirectoryListing(html);
+            
+            // Check for new files
+            const newFiles = currentFiles.filter(file => !knownFiles.has(file));
+            
+            if (newFiles.length > 0) {
+              console.error(`🚨 New file detected: ${newFiles[0]}`);
+              
+              // Get the content of the new file
+              const fileUrl = `${directoryUrl}${newFiles[0]}`;
+              const fileResponse = await fetch(fileUrl);
+              let errorText = await fileResponse.text();
+              
+              // If it's JSON, extract as plain text
+              try {
+                const parsed = JSON.parse(errorText);
+                errorText = JSON.stringify(parsed, null, 2); // Pretty print JSON
+              } catch {
+                // Already plain text, keep as-is
+                errorText = String(errorText);
+              }
+              
+              // Get current run info and stop it
+              const robotIp = "98.42.130.34";
+              let stopStatus = "⚠️ No running protocol found";
+              let currentRunId = null;
+              let lastCompletedStep = null;
+              
+              try {
+                // Import axios at the top of the function since we're using it here
+                const axios = (await import('axios')).default;
+                
+                const runsResponse = await axios.get(`http://${robotIp}:31950/runs`, {
+                  headers: { 'Opentrons-Version': '*' }
+                });
+                const activeRun = runsResponse.data.data.find(run => 
+                  run.status === "running" || run.status === "paused"
+                );
+                
+                if (activeRun) {
+                  currentRunId = activeRun.id;
+                  
+                  // Get detailed run info including protocol name and current status
+                  const runDetailResponse = await axios.get(`http://${robotIp}:31950/runs/${currentRunId}`, {
+                    headers: { 'Opentrons-Version': '*' }
+                  });
+                  const runDetail = runDetailResponse.data.data;
+                  
+                  const protocolName = runDetail.protocolId || 'Unknown Protocol';
+                  const currentStatus = runDetail.status;
+                  const currentCommand = runDetail.current ? runDetail.current.command : 'None';
+                  
+                  if (runDetail.commands) {
+                    const completedCommands = runDetail.commands.filter(cmd => cmd.status === "succeeded");
+                    const failedCommands = runDetail.commands.filter(cmd => cmd.status === "failed");
+                    lastCompletedStep = completedCommands.length;
+                    
+                    console.error(`Protocol: ${protocolName}, Status: ${currentStatus}, Step: ${lastCompletedStep}`);
+                  }
+                  
+                  // Stop the run
+                  await axios.post(`http://${robotIp}:31950/runs/${currentRunId}/actions`, {
+                    data: { actionType: "stop" },
+                    headers: { 'Opentrons-Version': '*' }
+                  });
+                  
+                  stopStatus = `✅ Robot stopped
+Protocol: ${protocolName}
+Run ID: ${currentRunId}
+Status: ${currentStatus} → stopped
+Completed steps: ${lastCompletedStep || 0}
+Current command: ${currentCommand}
+Failed commands: ${runDetail.commands ? runDetail.commands.filter(cmd => cmd.status === "failed").length : 0}`;
+                }
+              } catch (stopError) {
+                stopStatus = `❌ Stop failed: ${stopError.message}`;
+              }
+              
+              // Read original protocol and generate fix
+              const originalProtocol = fs.readFileSync(original_protocol_path, 'utf8');
+              const fixedProtocol = await this.generateFixedProtocol(errorText, originalProtocol, lastCompletedStep, currentRunId);
+              
+              return {
+                content: [{
+                  type: "text",
+                  text: `🚨 **NEW ERROR FILE**: ${newFiles[0]}\n\n📄 **CONTENT**:\n${errorText}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
+                }]
+              };
             }
-            if (currentCmd.error) {
-              currentStepInfo += `Error: ${currentCmd.error.detail}\n`;
-            }
+            
+            // Update known files
+            knownFiles = new Set(currentFiles);
           }
           
-          // stop the run
-          await this.controlRun({ robot_ip, run_id, action: 'stop' });
-          runInfo = `Run ${run_id} stopped\n`;
-          
-        } catch (e) {
-          runInfo = `Error stopping run: ${e.message}\n`;
+        } catch (error) {
+          console.error(`Poll error: ${error.message}`);
         }
-      } else {
-        runInfo = `Could not extract robot/run info from diagnostics\n`;
+        
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Check every 2 seconds
       }
-      
-      // plain text context string
-      const errorContext = `${runInfo}${currentStepInfo}Original diagnostics: ${diagnostics_raw}`;
       
       return {
         content: [{
           type: "text",
-          text: `🚨 **Error detected and run stopped**\n\n**Error Context**:\n\`\`\`\n${errorContext}\n\`\`\`\n\nCall \`call_protocol_fixer\` next with your protocol file path and this error context.`
+          text: "⏰ **Timeout**: No new files detected within polling period"
         }]
       };
       
@@ -2162,61 +2198,141 @@ listen().catch(console.error);
       return {
         content: [{
           type: "text",
-          text: `❌ **NATS listener failed**: ${error.message}`
+          text: `❌ **Polling failed**: ${error.message}`
         }]
       };
     }
   }
 
-  async callProtocolFixer(args) {
-    const { protocol_file_path, error_context, fixer_script_path = "./protocol_fixer.py" } = args;
+  parseDirectoryListing(html) {
+    // Simple regex to extract filenames from directory listing HTML
+    const linkRegex = /<a[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
+    const files = [];
+    let match;
     
+    while ((match = linkRegex.exec(html)) !== null) {
+      const filename = match[1];
+      // Skip parent directory links and directories
+      if (filename !== '../' && !filename.endsWith('/') && filename !== '..' && filename !== '.') {
+        files.push(filename);
+      }
+    }
+    
+    return files;
+  }
+
+  async generateFixedProtocol(errorText, originalProtocol, lastCompletedStep = null, currentRunId = null) {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) {
+      throw new Error("ANTHROPIC_API_KEY not configured");
+    }
+    
+    const workingExample = `from opentrons import protocol_api
+
+metadata = {
+    'protocolName': 'Pierce BCA Protein Assay Kit Aliquoting',
+    'author': 'OpentronsAI',
+    'description': 'Automated liquid handling for protein concentration determination using Pierce BCA Protein Assay Kit',
+    'source': 'OpentronsAI'
+}
+
+requirements = {
+    'robotType': 'Flex',
+    'apiLevel': '2.22'
+}
+
+def run(protocol: protocol_api.ProtocolContext):
+    # Load trash bin
+    trash = protocol.load_trash_bin('A3')
+    
+    # Load labware
+    reservoir = protocol.load_labware('nest_12_reservoir_15ml', 'D1', 'Source Reservoir')
+    pcr_plate = protocol.load_labware('nest_96_wellplate_100ul_pcr_full_skirt', 'D2', 'PCR Plate')
+    tiprack = protocol.load_labware('opentrons_flex_96_filtertiprack_50ul', 'D3', 'Filter Tips 50uL')
+    
+    # Load pipette
+    p50_multi = protocol.load_instrument('flex_8channel_50', 'left', tip_racks=[tiprack])
+    
+    # Define liquid
+    master_mix = protocol.define_liquid(
+        name='Master Mix',
+        description='Pierce BCA Protein Assay Master Mix',
+        display_color='#0066CC'
+    )
+    
+    # Load liquid into reservoir
+    reservoir['A1'].load_liquid(liquid=master_mix, volume=1500)
+    
+    # Protocol steps
+    protocol.comment("Starting Pierce BCA Protein Assay Kit aliquoting protocol")
+    
+    # Transfer 50 µL from reservoir to first 16 wells of PCR plate
+    source_well = reservoir['A1']
+    destination_wells = pcr_plate.columns()[:2]  # First 2 columns = 16 wells
+    
+    protocol.comment("Transferring 50 µL of master mix to first 16 wells of PCR plate")
+    
+    p50_multi.transfer(
+        volume=50,
+        source=source_well,
+        dest=destination_wells,
+        new_tip='once'
+    )
+    
+    protocol.comment("Protocol completed successfully")`;
+
+    let contextInfo = "";
+    if (lastCompletedStep !== null && currentRunId !== null) {
+      contextInfo = `\n\nRUN CONTEXT:
+- Run ID: ${currentRunId}
+- Successfully completed steps: ${lastCompletedStep}
+- The protocol should resume from or be modified to account for this point`;
+    }
+
+    const prompt = `Fix this Opentrons Flex protocol that failed with this error:
+
+ERROR: ${errorText}
+
+ORIGINAL FAILED PROTOCOL:
+${originalProtocol}
+
+WORKING REFERENCE PROTOCOL:
+${workingExample}${contextInfo}
+
+Generate a FIXED version of the original protocol that:
+1. Fixes the specific error mentioned
+2. Uses proper Flex deck positions (A1, B1, C1, D1, etc.)
+3. Uses proper Flex pipettes and labware
+4. Follows the working pattern from the reference
+5. Maintains the same general purpose as the original
+6. ${lastCompletedStep !== null ? `Accounts for the fact that ${lastCompletedStep} steps were already completed successfully` : 'Starts from the beginning'}
+
+Return ONLY the fixed Python code, no explanations or markdown.`;
+
     try {
-      const { exec } = await import('child_process');
-      const { promisify } = await import('util');
-      const execAsync = promisify(exec);
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": anthropicKey,
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify({
+          model: "claude-3-5-sonnet-20241022",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
       
-      // write context to temp file
-      const fs = await import('fs');
-      const tmpFile = `/tmp/error_context_${Date.now()}.txt`;
-      fs.writeFileSync(tmpFile, error_context);
-      
-      const cmd = `python3 "${fixer_script_path}" --protocol-file "${protocol_file_path}" --error-context "${tmpFile}"`;
-      
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 120000 });
-      
-      // cleanup
-      try { fs.unlinkSync(tmpFile); } catch {}
-      
-      if (stderr && !stderr.includes('INFO')) {
-        throw new Error(`Python script error: ${stderr}`);
+      if (!response.ok) {
+        throw new Error(`Claude API error: ${response.status}`);
       }
       
-      const result = JSON.parse(stdout.trim());
-      
-      if (result.success) {
-        return {
-          content: [{
-            type: "text",
-            text: `✅ **Fixed protocol generated**\n\n**File**: ${result.fixed_protocol_path}\n**Description**: ${result.description}\n\nReady to upload with \`upload_protocol\` tool.`
-          }]
-        };
-      } else {
-        return {
-          content: [{
-            type: "text",
-            text: `❌ **Fix failed**: ${result.error}`
-          }]
-        };
-      }
+      const result = await response.json();
+      return result.content[0].text;
       
     } catch (error) {
-      return {
-        content: [{
-          type: "text",
-          text: `❌ **Fixer error**: ${error.message}`
-        }]
-      };
+      return `❌ Failed to generate fix: ${error.message}\n\nORIGINAL PROTOCOL:\n${originalProtocol}`;
     }
   }
 
