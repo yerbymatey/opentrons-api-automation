@@ -2061,7 +2061,7 @@ class OpentronsMCP {
     
     try {
       const axios = (await import('axios')).default;
-      const baseUrl = 'http://98.42.130.34:8080';
+      const baseUrl = 'http://192.168.0.145:8080/';
       const directoryUrl = `${baseUrl}/directory/report/`;
       
       const startTime = Date.now();
