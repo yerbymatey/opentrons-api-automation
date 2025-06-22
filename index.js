@@ -2061,6 +2061,7 @@ class OpentronsMCP {
     const { directory = "", timeout = 3000, original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
     
     try {
+      const axios = (await import('axios')).default;
       const baseUrl = 'http://98.42.130.34:8080';
       const directoryUrl = directory ? `${baseUrl}/${directory}/` : baseUrl;
       
@@ -2115,12 +2116,7 @@ class OpentronsMCP {
               let lastCompletedStep = null;
               
               try {
-                // Import axios at the top of the function since we're using it here
-                const axios = (await import('axios')).default;
-                
-                const runsResponse = await axios.get(`http://${robotIp}:31950/runs`, {
-                  headers: { 'Opentrons-Version': '*' }
-                });
+                const runsResponse = await axios.get(`http://${robotIp}:31950/runs`);
                 const activeRun = runsResponse.data.data.find(run => 
                   run.status === "running" || run.status === "paused"
                 );
@@ -2129,9 +2125,7 @@ class OpentronsMCP {
                   currentRunId = activeRun.id;
                   
                   // Get detailed run info including protocol name and current status
-                  const runDetailResponse = await axios.get(`http://${robotIp}:31950/runs/${currentRunId}`, {
-                    headers: { 'Opentrons-Version': '*' }
-                  });
+                  const runDetailResponse = await axios.get(`http://${robotIp}:31950/runs/${currentRunId}`);
                   const runDetail = runDetailResponse.data.data;
                   
                   const protocolName = runDetail.protocolId || 'Unknown Protocol';
@@ -2143,13 +2137,12 @@ class OpentronsMCP {
                     const failedCommands = runDetail.commands.filter(cmd => cmd.status === "failed");
                     lastCompletedStep = completedCommands.length;
                     
-                    console.error(`Protocol: ${protocolName}, Status: ${currentStatus}, Step: ${lastCompletedStep}`);
+                    console.log(`Protocol: ${protocolName}, Status: ${currentStatus}, Step: ${lastCompletedStep}`);
                   }
                   
                   // Stop the run
                   await axios.post(`http://${robotIp}:31950/runs/${currentRunId}/actions`, {
-                    data: { actionType: "stop" },
-                    headers: { 'Opentrons-Version': '*' }
+                    data: { actionType: "stop" }
                   });
                   
                   stopStatus = `✅ Robot stopped
@@ -2158,7 +2151,7 @@ Run ID: ${currentRunId}
 Status: ${currentStatus} → stopped
 Completed steps: ${lastCompletedStep || 0}
 Current command: ${currentCommand}
-Failed commands: ${runDetail.commands ? runDetail.commands.filter(cmd => cmd.status === "failed").length : 0}`;
+Failed commands: ${failedCommands?.length || 0}`;
                 }
               } catch (stopError) {
                 stopStatus = `❌ Stop failed: ${stopError.message}`;
