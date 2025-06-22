@@ -222,11 +222,10 @@ class OpentronsMCP {
           },
           {
             name: "poll_error_endpoint_and_fix",
-            description: "Poll HTTP endpoint for JSON error reports and automatically fix protocols when detected",
+            description: "Find the latest JSON error report by datetime and automatically fix protocols",
             inputSchema: {
               type: "object",
               properties: {
-                timeout: { type: "number", default: 3000, description: "Timeout in seconds" },
                 original_protocol_path: { type: "string", default: "/Users/gene/Developer/failed-protocol-5.py", description: "Path to original protocol file" }
               }
             }
@@ -2057,134 +2056,152 @@ class OpentronsMCP {
   }
 
   async pollErrorEndpointAndFix(args) {
-    const { timeout = 3000, original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
+    const { original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
     
     try {
       const axios = (await import('axios')).default;
-      const baseUrl = 'http://192.168.0.145:8080/';
-      const directoryUrl = `${baseUrl}/`;
+      const baseUrl = 'http://98.42.130.34:8080';
+      const directoryUrl = `${baseUrl}/directory/report/`;
       
-      const startTime = Date.now();
-      let knownFiles = new Set();
+      console.error(`🔍 Looking for JSON error reports in ${directoryUrl}`);
       
-      // Get initial file list
-      try {
-        const initialResponse = await fetch(directoryUrl);
-        if (initialResponse.ok) {
-          const initialHtml = await initialResponse.text();
-          const initialFiles = this.parseDirectoryListing(initialHtml);
-          knownFiles = new Set(initialFiles);
-          console.error(`🔍 Monitoring ${directoryUrl} for JSON error reports - initial files: ${knownFiles.size}`);
-        }
-      } catch (error) {
-        console.error(`Starting fresh - no initial directory found at /directory/report/`);
+      // Get all files from directory
+      const response = await fetch(directoryUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to access directory: ${response.status}`);
       }
       
-      // Poll for new files
-      while ((Date.now() - startTime) < timeout * 1000) {
+      const html = await response.text();
+      const allFiles = this.parseDirectoryListing(html);
+      
+      // Filter for JSON files only
+      const jsonFiles = allFiles.filter(file => file.toLowerCase().endsWith('.json'));
+      
+      if (jsonFiles.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "❌ **No JSON error reports found** in /directory/report/"
+          }]
+        };
+      }
+      
+      console.error(`📄 Found ${jsonFiles.length} JSON files, analyzing for latest datetime...`);
+      
+      // Analyze each JSON file to find the one with highest datetime
+      let latestFile = null;
+      let latestDateTime = null;
+      let latestContent = null;
+      
+      for (const fileName of jsonFiles) {
         try {
-          const response = await fetch(directoryUrl);
-          if (response.ok) {
-            const html = await response.text();
-            const currentFiles = this.parseDirectoryListing(html);
+          const fileUrl = `${directoryUrl}${fileName}`;
+          const fileResponse = await fetch(fileUrl);
+          const fileContent = await fileResponse.text();
+          
+          try {
+            const jsonData = JSON.parse(fileContent);
             
-            // Check for new JSON files
-            const newJsonFiles = currentFiles.filter(file => 
-              !knownFiles.has(file) && file.toLowerCase().endsWith('.json')
-            );
+            // Look for datetime fields in various common formats
+            let fileDateTime = null;
+            const dateFields = ['datetime', 'timestamp', 'created_at', 'time', 'date', 'error_time'];
             
-            if (newJsonFiles.length > 0) {
-              console.error(`🚨 New JSON error report detected: ${newJsonFiles[0]}`);
-              
-              // Get the content of the new JSON file
-              const fileUrl = `${directoryUrl}${newJsonFiles[0]}`;
-              const fileResponse = await fetch(fileUrl);
-              let errorText = await fileResponse.text();
-              
-              // If it's JSON, extract as plain text
-              try {
-                const parsed = JSON.parse(errorText);
-                errorText = JSON.stringify(parsed, null, 2); // Pretty print JSON
-              } catch {
-                // Already plain text, keep as-is
-                errorText = String(errorText);
+            for (const field of dateFields) {
+              if (jsonData[field]) {
+                fileDateTime = new Date(jsonData[field]);
+                break;
               }
-              
-              // Get current run info and stop it
-              const robotIp = "192.168.0.83";
-              let stopStatus = "⚠️ No running protocol found";
-              let currentRunId = null;
-              let lastCompletedStep = null;
-              
-              try {
-                const runsResponse = await axios.get(`http://${robotIp}:31950/runs`);
-                const activeRun = runsResponse.data.data.find(run => 
-                  run.status === "running" || run.status === "paused"
-                );
-                
-                if (activeRun) {
-                  currentRunId = activeRun.id;
-                  
-                  // Get detailed run info including protocol name and current status
-                  const runDetailResponse = await axios.get(`http://${robotIp}:31950/runs/${currentRunId}`);
-                  const runDetail = runDetailResponse.data.data;
-                  
-                  const protocolName = runDetail.protocolId || 'Unknown Protocol';
-                  const currentStatus = runDetail.status;
-                  const currentCommand = runDetail.current ? runDetail.current.command : 'None';
-                  
-                  if (runDetail.commands) {
-                    const completedCommands = runDetail.commands.filter(cmd => cmd.status === "succeeded");
-                    const failedCommands = runDetail.commands.filter(cmd => cmd.status === "failed");
-                    lastCompletedStep = completedCommands.length;
-                    
-                    console.log(`Protocol: ${protocolName}, Status: ${currentStatus}, Step: ${lastCompletedStep}`);
-                  }
-                  
-                  // Stop the run
-                  await axios.post(`http://${robotIp}:31950/runs/${currentRunId}/actions`, {
-                    data: { actionType: "stop" }
-                  });
-                  
-                  stopStatus = `✅ Robot stopped
+            }
+            
+            // If no explicit datetime field, try to parse filename for datetime
+            if (!fileDateTime || isNaN(fileDateTime)) {
+              const dateMatch = fileName.match(/(\d{4}-\d{2}-\d{2}[\s_T]\d{2}:\d{2}:\d{2})/);
+              if (dateMatch) {
+                fileDateTime = new Date(dateMatch[1]);
+              }
+            }
+            
+            if (fileDateTime && !isNaN(fileDateTime) && (!latestDateTime || fileDateTime > latestDateTime)) {
+              latestDateTime = fileDateTime;
+              latestFile = fileName;
+              latestContent = JSON.stringify(jsonData, null, 2);
+            }
+            
+          } catch (parseError) {
+            console.error(`Failed to parse JSON in ${fileName}: ${parseError.message}`);
+          }
+        } catch (fetchError) {
+          console.error(`Failed to fetch ${fileName}: ${fetchError.message}`);
+        }
+      }
+      
+      if (!latestFile) {
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **No valid JSON error reports found** - checked ${jsonFiles.length} files but none had valid datetime information`
+          }]
+        };
+      }
+      
+      console.error(`🚨 Processing latest JSON error report: ${latestFile} (${latestDateTime.toISOString()})`);
+      
+      // Get current run info and stop it
+      const robotIp = "98.42.130.34";
+      let stopStatus = "⚠️ No running protocol found";
+      let currentRunId = null;
+      let lastCompletedStep = null;
+      
+      try {
+        const runsResponse = await axios.get(`http://${robotIp}:31950/runs`);
+        const activeRun = runsResponse.data.data.find(run => 
+          run.status === "running" || run.status === "paused"
+        );
+        
+        if (activeRun) {
+          currentRunId = activeRun.id;
+          
+          // Get detailed run info including protocol name and current status
+          const runDetailResponse = await axios.get(`http://${robotIp}:31950/runs/${currentRunId}`);
+          const runDetail = runDetailResponse.data.data;
+          
+          const protocolName = runDetail.protocolId || 'Unknown Protocol';
+          const currentStatus = runDetail.status;
+          const currentCommand = runDetail.current ? runDetail.current.command : 'None';
+          
+          if (runDetail.commands) {
+            const completedCommands = runDetail.commands.filter(cmd => cmd.status === "succeeded");
+            const failedCommands = runDetail.commands.filter(cmd => cmd.status === "failed");
+            lastCompletedStep = completedCommands.length;
+            
+            console.log(`Protocol: ${protocolName}, Status: ${currentStatus}, Step: ${lastCompletedStep}`);
+          }
+          
+          // Stop the run
+          await axios.post(`http://${robotIp}:31950/runs/${currentRunId}/actions`, {
+            data: { actionType: "stop" }
+          });
+          
+          stopStatus = `✅ Robot stopped
 Protocol: ${protocolName}
 Run ID: ${currentRunId}
 Status: ${currentStatus} → stopped
 Completed steps: ${lastCompletedStep || 0}
 Current command: ${currentCommand}
 Failed commands: ${failedCommands?.length || 0}`;
-                }
-              } catch (stopError) {
-                stopStatus = `❌ Stop failed: ${stopError.message}`;
-              }
-              
-              // Read original protocol and generate fix
-              const originalProtocol = fs.readFileSync(original_protocol_path, 'utf8');
-              const fixedProtocol = await this.generateFixedProtocol(errorText, originalProtocol, lastCompletedStep, currentRunId);
-              
-              return {
-                content: [{
-                  type: "text",
-                  text: `🚨 **NEW JSON ERROR REPORT**: ${newJsonFiles[0]}\n\n📄 **CONTENT**:\n${errorText}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
-                }]
-              };
-            }
-            
-            // Update known files
-            knownFiles = new Set(currentFiles);
-          }
-          
-        } catch (error) {
-          console.error(`Poll error: ${error.message}`);
         }
-        
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Check every 2 seconds
+      } catch (stopError) {
+        stopStatus = `❌ Stop failed: ${stopError.message}`;
       }
+      
+      // Read original protocol and generate fix
+      const originalProtocol = fs.readFileSync(original_protocol_path, 'utf8');
+      const fixedProtocol = await this.generateFixedProtocol(latestContent, originalProtocol, lastCompletedStep, currentRunId);
       
       return {
         content: [{
           type: "text",
-          text: "⏰ **Timeout**: No new JSON error reports detected within polling period"
+          text: `🚨 **LATEST JSON ERROR REPORT**: ${latestFile}\n**DateTime**: ${latestDateTime.toISOString()}\n\n📄 **CONTENT**:\n${latestContent}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
         }]
       };
       
@@ -2192,7 +2209,7 @@ Failed commands: ${failedCommands?.length || 0}`;
       return {
         content: [{
           type: "text",
-          text: `❌ **Polling failed**: ${error.message}`
+          text: `❌ **Analysis failed**: ${error.message}`
         }]
       };
     }
