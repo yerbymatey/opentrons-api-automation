@@ -2062,7 +2062,7 @@ class OpentronsMCP {
     try {
       const axios = (await import('axios')).default;
       const baseUrl = 'http://192.168.0.145:8080/';
-      const directoryUrl = `${baseUrl}/download/report/`;
+      const directoryUrl = `${baseUrl}/report/`;
       
       const startTime = Date.now();
       let knownFiles = new Set();
