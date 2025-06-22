@@ -1,0 +1,23 @@
+{
+  "name": "opentrons-api-automation",
+  "version": "1.0.0",
+  "description": "MCP server for Opentrons HTTP API documentation and endpoint discovery",
+  "type": "module",
+  "bin": {
+    "opentrons-api-automation": "./index.js"
+  },
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["opentrons", "mcp", "api"],
+  "author": "yerbymatey",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "form-data": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
