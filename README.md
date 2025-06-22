@@ -20,12 +20,12 @@ A Model Context Protocol (MCP) server for Opentrons robot automation and API doc
 
 ### From npm (recommended)
 ```bash
-npm install -g opentrons-mcp-server
+npm install -g opentrons-mcp
 ```
 
 ### From source
 ```bash
-git clone https://github.com/yourusername/opentrons-mcp.git
+git clone https://github.com/yerbymatey/opentrons-mcp.git
 cd opentrons-mcp
 npm install
 ```
