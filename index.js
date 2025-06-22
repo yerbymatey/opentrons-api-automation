@@ -2060,8 +2060,8 @@ class OpentronsMCP {
     
     try {
       const axios = (await import('axios')).default;
-      const baseUrl = 'http://98.42.130.34:8080';
-      const directoryUrl = `${baseUrl}/directory/report/`;
+      const baseUrl = 'http://192.168.0.145:8080';
+      const directoryUrl = `${baseUrl}/reports/`;
       
       console.error(`🔍 Looking for JSON error reports in ${directoryUrl}`);
       
@@ -2081,7 +2081,7 @@ class OpentronsMCP {
         return {
           content: [{
             type: "text",
-            text: "❌ **No JSON error reports found** in /directory/report/"
+            text: "❌ **No JSON error reports found** in /reports/"
           }]
         };
       }
