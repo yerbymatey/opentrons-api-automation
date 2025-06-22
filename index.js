@@ -222,11 +222,10 @@ class OpentronsMCP {
           },
           {
             name: "poll_error_endpoint_and_fix",
-            description: "Poll HTTP endpoint for errors and automatically fix protocols when detected",
+            description: "Poll HTTP endpoint for JSON error reports and automatically fix protocols when detected",
             inputSchema: {
               type: "object",
               properties: {
-                directory: { type: "string", default: "", description: "Directory path for error file (optional)" },
                 timeout: { type: "number", default: 3000, description: "Timeout in seconds" },
                 original_protocol_path: { type: "string", default: "/Users/gene/Developer/failed-protocol-5.py", description: "Path to original protocol file" }
               }
@@ -2058,12 +2057,12 @@ class OpentronsMCP {
   }
 
   async pollErrorEndpointAndFix(args) {
-    const { directory = "", timeout = 3000, original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
+    const { timeout = 3000, original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
     
     try {
       const axios = (await import('axios')).default;
       const baseUrl = 'http://98.42.130.34:8080';
-      const directoryUrl = directory ? `${baseUrl}/${directory}/` : baseUrl;
+      const directoryUrl = `${baseUrl}/directory/report/`;
       
       const startTime = Date.now();
       let knownFiles = new Set();
@@ -2075,10 +2074,10 @@ class OpentronsMCP {
           const initialHtml = await initialResponse.text();
           const initialFiles = this.parseDirectoryListing(initialHtml);
           knownFiles = new Set(initialFiles);
-          console.error(`🔍 Monitoring ${directoryUrl} - initial files: ${knownFiles.size}`);
+          console.error(`🔍 Monitoring ${directoryUrl} for JSON error reports - initial files: ${knownFiles.size}`);
         }
       } catch (error) {
-        console.error(`Starting fresh - no initial directory found`);
+        console.error(`Starting fresh - no initial directory found at /directory/report/`);
       }
       
       // Poll for new files
@@ -2089,14 +2088,16 @@ class OpentronsMCP {
             const html = await response.text();
             const currentFiles = this.parseDirectoryListing(html);
             
-            // Check for new files
-            const newFiles = currentFiles.filter(file => !knownFiles.has(file));
+            // Check for new JSON files
+            const newJsonFiles = currentFiles.filter(file => 
+              !knownFiles.has(file) && file.toLowerCase().endsWith('.json')
+            );
             
-            if (newFiles.length > 0) {
-              console.error(`🚨 New file detected: ${newFiles[0]}`);
+            if (newJsonFiles.length > 0) {
+              console.error(`🚨 New JSON error report detected: ${newJsonFiles[0]}`);
               
-              // Get the content of the new file
-              const fileUrl = `${directoryUrl}${newFiles[0]}`;
+              // Get the content of the new JSON file
+              const fileUrl = `${directoryUrl}${newJsonFiles[0]}`;
               const fileResponse = await fetch(fileUrl);
               let errorText = await fileResponse.text();
               
@@ -2164,7 +2165,7 @@ Failed commands: ${failedCommands?.length || 0}`;
               return {
                 content: [{
                   type: "text",
-                  text: `🚨 **NEW ERROR FILE**: ${newFiles[0]}\n\n📄 **CONTENT**:\n${errorText}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
+                  text: `🚨 **NEW JSON ERROR REPORT**: ${newJsonFiles[0]}\n\n📄 **CONTENT**:\n${errorText}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
                 }]
               };
             }
@@ -2183,7 +2184,7 @@ Failed commands: ${failedCommands?.length || 0}`;
       return {
         content: [{
           type: "text",
-          text: "⏰ **Timeout**: No new files detected within polling period"
+          text: "⏰ **Timeout**: No new JSON error reports detected within polling period"
         }]
       };
       
