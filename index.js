@@ -1492,13 +1492,13 @@ class OpentronsMCP {
 
   // Automation tool methods
   async uploadProtocol(args) {
-    const { robot_ip, file_path, support_files = [], protocol_kind = "standard", key, run_time_parameters } = args;
-
+    const { robot_ip, file_path, support_files = [], protocol_kind = "standard" } = args;
+    
     try {
-      // Import required modules with proper Node.js syntax
+      // Import required modules
       const fs = await import('fs');
       const path = await import('path');
-
+      
       // Check if main protocol file exists and is readable
       if (!fs.existsSync(file_path)) {
         return {
@@ -1532,84 +1532,64 @@ class OpentronsMCP {
         };
       }
 
-      // Create form data using the already imported FormData from 'form-data' package
-      const form = new FormData();
-      const fileName = path.basename(file_path);
-      
-      // Add main protocol file as stream
-      const protocolStream = fs.createReadStream(file_path);
-      form.append('protocolFile', protocolStream, {
-        filename: fileName,
-        contentType: ext === '.py' ? 'text/x-python' : 'application/json'
-      });
+      // For now, let's use curl instead of trying to fight FormData
+      const { exec } = await import('child_process');
+      const { promisify } = await import('util');
+      const execAsync = promisify(exec);
 
-      // Add support files if provided
+      // Build curl command
+      let curlCmd = `curl -X POST "http://${robot_ip}:31950/protocols"`;
+      curlCmd += ` -H "Opentrons-Version: *"`;
+      curlCmd += ` -H "accept: application/json"`;
+      curlCmd += ` -F "protocolFile=@${file_path}"`;
+      
+      // Add support files
       for (const supportPath of support_files) {
         if (fs.existsSync(supportPath)) {
-          try {
-            fs.accessSync(supportPath, fs.constants.R_OK);
-            const supportStream = fs.createReadStream(supportPath);
-            const supportName = path.basename(supportPath);
-            form.append('supportFiles', supportStream, { filename: supportName });
-          } catch (err) {
-            console.error(`Warning: Cannot read support file ${supportPath}: ${err.message}`);
-          }
+          curlCmd += ` -F "supportFiles=@${supportPath}"`;
         }
       }
-
+      
       // Add protocol kind if not standard
       if (protocol_kind !== "standard") {
-        form.append('protocolKind', protocol_kind);
+        curlCmd += ` -F "protocolKind=${protocol_kind}"`;
       }
 
-      // Add optional fields
-      if (key) {
-        form.append('key', key);
-      }
+      console.error(`Executing: ${curlCmd}`);
       
-      if (run_time_parameters) {
-        form.append('runTimeParameterValues', JSON.stringify(run_time_parameters));
+      const { stdout, stderr } = await execAsync(curlCmd);
+      
+      if (stderr && !stderr.includes('% Total')) {
+        throw new Error(`Curl error: ${stderr}`);
       }
 
-      // Make request
-      const url = `http://${robot_ip}:31950/protocols`;
-      const response = await fetch(url, {
-        method: 'POST',
-        body: form,
-        headers: {
-          'Opentrons-Version': '*',
-          ...form.getHeaders()
-        }
-      });
-
-      const responseText = await response.text();
       let responseData;
-      
       try {
-        responseData = JSON.parse(responseText);
+        responseData = JSON.parse(stdout);
       } catch (parseErr) {
         return {
           content: [{
             type: "text",
-            text: `❌ **Upload failed** - Invalid response from robot\n\n**Status**: ${response.status} ${response.statusText}\n**Response**: ${responseText.slice(0, 500)}${responseText.length > 500 ? '...' : ''}\n\n**Possible issues**:\n- Robot not reachable at ${robot_ip}:31950\n- Robot server not running\n- Network connectivity problems`
+            text: `❌ **Upload failed** - Invalid response from robot\n\n**Response**: ${stdout.slice(0, 500)}${stdout.length > 500 ? '...' : ''}\n\n**Possible issues**:\n- Robot not reachable at ${robot_ip}:31950\n- Robot server not running\n- Network connectivity problems`
           }]
         };
       }
 
-      if (!response.ok) {
-        const errorMsg = responseData?.message || responseData?.error || 'Unknown error';
-        const errors = responseData?.data?.errors || [];
-        
-        let errorDetails = `❌ **Upload failed**\n\n**Status**: ${response.status} ${response.statusText}\n**Error**: ${errorMsg}\n`;
+      // Check for errors in response
+      if (responseData.errors || (responseData.data && responseData.data.errors)) {
+        const errors = responseData.errors || responseData.data.errors || [];
+        let errorDetails = `❌ **Upload failed**\n\n`;
         
         if (errors.length > 0) {
-          errorDetails += `\n**Protocol Errors**:\n${errors.map(err => `- ${err.detail || err}`).join('\n')}\n`;
+          errorDetails += `**Protocol Errors**:\n${errors.map(err => `- ${err.detail || err.message || err}`).join('\n')}\n`;
+        } else {
+          errorDetails += `**Error**: ${responseData.message || 'Unknown error'}\n`;
         }
         
         errorDetails += `\n**Troubleshooting**:\n`;
-        errorDetails += `- Check robot is connected and responsive: \`GET http://${robot_ip}:31950/health\`\n`;
+        errorDetails += `- Check robot is connected: \`curl http://${robot_ip}:31950/health\`\n`;
         errorDetails += `- Verify protocol file syntax\n`;
-        errorDetails += `- Try uploading via Opentrons App first to validate protocol\n`;
+        errorDetails += `- Try uploading via Opentrons App first\n`;
         
         return {
           content: [{
@@ -1621,22 +1601,22 @@ class OpentronsMCP {
 
       // Success response
       const protocolId = responseData?.data?.id;
-      const protocolName = responseData?.data?.metadata?.protocolName || fileName;
+      const protocolName = responseData?.data?.metadata?.protocolName || path.basename(file_path);
       const apiVersion = responseData?.data?.metadata?.apiLevel || 'Unknown';
       
       let successMsg = `✅ **Protocol uploaded successfully!**\n\n`;
       successMsg += `**Protocol ID**: \`${protocolId}\`\n`;
       successMsg += `**Name**: ${protocolName}\n`;
       successMsg += `**API Version**: ${apiVersion}\n`;
-      successMsg += `**File**: ${fileName}\n`;
+      successMsg += `**File**: ${path.basename(file_path)}\n`;
       
       if (support_files.length > 0) {
         successMsg += `**Support Files**: ${support_files.length} files\n`;
       }
       
       successMsg += `\n**Next Steps**:\n`;
-      successMsg += `1. Create a run: \`POST http://${robot_ip}:31950/runs\` with \`{"data": {"protocolId": "${protocolId}"}}\`\n`;
-      successMsg += `2. Start run: \`POST http://${robot_ip}:31950/runs/{run_id}/actions\` with \`{"data": {"actionType": "play"}}\`\n`;
+      successMsg += `1. Create a run: \`POST /runs\` with \`{"data": {"protocolId": "${protocolId}"}}\`\n`;
+      successMsg += `2. Start run: \`POST /runs/{run_id}/actions\` with \`{"data": {"actionType": "play"}}\`\n`;
       
       // Check for analysis warnings
       if (responseData?.data?.analyses?.length > 0) {
@@ -1659,7 +1639,7 @@ class OpentronsMCP {
       return {
         content: [{
           type: "text",
-          text: `❌ **Upload error**: ${error.message}\n\n**Possible causes**:\n- Network connectivity issues\n- Robot server not responding\n- File system permissions\n\n**Debug info**: ${error.stack?.split('\n')[0] || 'No stack trace'}`
+          text: `❌ **Upload error**: ${error.message}\n\n**Possible causes**:\n- Robot not reachable at ${robot_ip}:31950\n- Network connectivity issues\n- File permissions\n- curl not installed\n\n**Debug info**: ${error.stack?.split('\n')[0] || 'No stack trace'}`
         }]
       };
     }
