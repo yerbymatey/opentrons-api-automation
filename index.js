@@ -7,7 +7,6 @@ import {
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from 'fs';
-import FormData from 'form-data';
 
 class OpentronsMCP {
   constructor() {
@@ -1493,31 +1492,31 @@ class OpentronsMCP {
 
   // Automation tool methods
   async uploadProtocol(args) {
-    const { robot_ip, file_path, support_files = [], protocol_kind = "standard" } = args;
+    const { robot_ip, file_path, support_files = [], protocol_kind = "standard", key, run_time_parameters } = args;
 
     try {
+      // Import required modules with proper Node.js syntax
       const fs = await import('fs');
       const path = await import('path');
-      const FormData = await import('form-data');
 
-      // FILE VALIDATION GOES HERE (before fetch)
+      // Check if main protocol file exists and is readable
       if (!fs.existsSync(file_path)) {
         return {
           content: [{
             type: "text",
-            text: `**File not found**: ${file_path}`
+            text: `❌ **File not found**: ${file_path}\n\nPlease check:\n- File path is correct\n- File exists\n- You have read permissions`
           }]
         };
       }
 
-      // Check permissions
+      // Check file permissions
       try {
         fs.accessSync(file_path, fs.constants.R_OK);
       } catch (err) {
         return {
           content: [{
-            type: "text",
-            text: `**Permission denied**: Cannot read ${file_path}`
+            type: "text", 
+            text: `❌ **Permission denied**: Cannot read ${file_path}\n\nTry:\n- \`chmod 644 "${file_path}"\`\n- Moving file to a readable location\n- Running with proper permissions`
           }]
         };
       }
@@ -1528,22 +1527,23 @@ class OpentronsMCP {
         return {
           content: [{
             type: "text",
-            text: `**Invalid file type**: ${ext}\n\nMust be .py or .json`
+            text: `❌ **Invalid file type**: ${ext}\n\nOpentrons protocols must be:\n- Python files (.py)\n- JSON protocol files (.json)`
           }]
         };
       }
-      
-      // Create form data
-      const form = new FormData();
-      const protocolStream = fs.createReadStream(file_path);
-      const fileName = path.basename(file_path);
 
+      // Create form data using the already imported FormData from 'form-data' package
+      const form = new FormData();
+      const fileName = path.basename(file_path);
+      
+      // Add main protocol file as stream
+      const protocolStream = fs.createReadStream(file_path);
       form.append('protocolFile', protocolStream, {
         filename: fileName,
         contentType: ext === '.py' ? 'text/x-python' : 'application/json'
       });
 
-      // Add support files with proper handling
+      // Add support files if provided
       for (const supportPath of support_files) {
         if (fs.existsSync(supportPath)) {
           try {
@@ -1556,7 +1556,12 @@ class OpentronsMCP {
           }
         }
       }
-      
+
+      // Add protocol kind if not standard
+      if (protocol_kind !== "standard") {
+        form.append('protocolKind', protocol_kind);
+      }
+
       // Add optional fields
       if (key) {
         form.append('key', key);
@@ -1565,43 +1570,56 @@ class OpentronsMCP {
       if (run_time_parameters) {
         form.append('runTimeParameterValues', JSON.stringify(run_time_parameters));
       }
-      
-      const response = await fetch(`http://${robot_ip}:31950/protocols`, {
+
+      // Make request
+      const url = `http://${robot_ip}:31950/protocols`;
+      const response = await fetch(url, {
         method: 'POST',
+        body: form,
         headers: {
           'Opentrons-Version': '*',
           ...form.getHeaders()
-        },
-        body: form
+        }
       });
-      
+
       const responseText = await response.text();
       let responseData;
-
+      
       try {
         responseData = JSON.parse(responseText);
       } catch (parseErr) {
         return {
           content: [{
             type: "text",
-            text: `❌ **Upload failed** - Invalid response: ${responseText.slice(0, 200)}`
+            text: `❌ **Upload failed** - Invalid response from robot\n\n**Status**: ${response.status} ${response.statusText}\n**Response**: ${responseText.slice(0, 500)}${responseText.length > 500 ? '...' : ''}\n\n**Possible issues**:\n- Robot not reachable at ${robot_ip}:31950\n- Robot server not running\n- Network connectivity problems`
           }]
         };
       }
-      
+
       if (!response.ok) {
-        const errorMsg = responseData?.message || 'Unknown error';
+        const errorMsg = responseData?.message || responseData?.error || 'Unknown error';
         const errors = responseData?.data?.errors || [];
-
-        let errorDetails = `❌ **Upload failed**\n**Status**: ${response.status}\n**Error**: ${errorMsg}\n`;
-
+        
+        let errorDetails = `❌ **Upload failed**\n\n**Status**: ${response.status} ${response.statusText}\n**Error**: ${errorMsg}\n`;
+        
         if (errors.length > 0) {
-          errorDetails += `\n**Protocol Errors**:\n${errors.map(err => `- ${err.detail || err}`).join('\n')}`;
+          errorDetails += `\n**Protocol Errors**:\n${errors.map(err => `- ${err.detail || err}`).join('\n')}\n`;
         }
-
-        return { content: [{ type: "text", text: errorDetails }] };
+        
+        errorDetails += `\n**Troubleshooting**:\n`;
+        errorDetails += `- Check robot is connected and responsive: \`GET http://${robot_ip}:31950/health\`\n`;
+        errorDetails += `- Verify protocol file syntax\n`;
+        errorDetails += `- Try uploading via Opentrons App first to validate protocol\n`;
+        
+        return {
+          content: [{
+            type: "text",
+            text: errorDetails
+          }]
+        };
       }
-      
+
+      // Success response
       const protocolId = responseData?.data?.id;
       const protocolName = responseData?.data?.metadata?.protocolName || fileName;
       const apiVersion = responseData?.data?.metadata?.apiLevel || 'Unknown';
@@ -1610,17 +1628,38 @@ class OpentronsMCP {
       successMsg += `**Protocol ID**: \`${protocolId}\`\n`;
       successMsg += `**Name**: ${protocolName}\n`;
       successMsg += `**API Version**: ${apiVersion}\n`;
+      successMsg += `**File**: ${fileName}\n`;
+      
+      if (support_files.length > 0) {
+        successMsg += `**Support Files**: ${support_files.length} files\n`;
+      }
       
       successMsg += `\n**Next Steps**:\n`;
-      successMsg += `1. Create run: \`{"data": {"protocolId": "${protocolId}"}}\`\n`;
-      successMsg += `2. Start run: \`{"data": {"actionType": "play"}}\`\n`;
+      successMsg += `1. Create a run: \`POST http://${robot_ip}:31950/runs\` with \`{"data": {"protocolId": "${protocolId}"}}\`\n`;
+      successMsg += `2. Start run: \`POST http://${robot_ip}:31950/runs/{run_id}/actions\` with \`{"data": {"actionType": "play"}}\`\n`;
       
-      return { content: [{ type: "text", text: successMsg }] };
+      // Check for analysis warnings
+      if (responseData?.data?.analyses?.length > 0) {
+        const analysis = responseData.data.analyses[0];
+        if (analysis.status === 'completed' && analysis.result === 'ok') {
+          successMsg += `\n✅ **Protocol analysis passed** - Ready to run\n`;
+        } else if (analysis.status === 'completed' && analysis.result === 'error') {
+          successMsg += `\n⚠️ **Protocol analysis found issues** - Check protocol before running\n`;
+        }
+      }
+      
+      return {
+        content: [{
+          type: "text",
+          text: successMsg
+        }]
+      };
+
     } catch (error) {
       return {
         content: [{
           type: "text",
-          text: `❌ **Upload error**: ${error.message}`
+          text: `❌ **Upload error**: ${error.message}\n\n**Possible causes**:\n- Network connectivity issues\n- Robot server not responding\n- File system permissions\n\n**Debug info**: ${error.stack?.split('\n')[0] || 'No stack trace'}`
         }]
       };
     }

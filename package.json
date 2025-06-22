@@ -19,8 +19,7 @@
   "author": "yerbymatey",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
-    "form-data": "^4.0.3"
+    "@modelcontextprotocol/sdk": "latest"
   },
   "engines": {
     "node": ">=18.0.0"
