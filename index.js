@@ -13,8 +13,8 @@ class OpentronsAPIAutomationServer {
   constructor() {
     this.server = new Server(
       {
-        name: "opentrons-api-automation",
-        version: "2.0.0",
+        name: "opentrons-mcp",
+        version: "1.0.0",
       },
       {
         capabilities: {
