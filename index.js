@@ -222,10 +222,11 @@ class OpentronsMCP {
           },
           {
             name: "poll_error_endpoint_and_fix",
-            description: "Find the latest JSON error report by datetime and automatically fix protocols",
+            description: "Fetch specific JSON error report and automatically fix protocols",
             inputSchema: {
               type: "object",
               properties: {
+                json_filename: { type: "string", default: "error_report_20250622_124746.json", description: "Name of JSON file to fetch" },
                 original_protocol_path: { type: "string", default: "/Users/gene/Developer/failed-protocol-5.py", description: "Path to original protocol file" }
               }
             }
@@ -2056,98 +2057,34 @@ class OpentronsMCP {
   }
 
   async pollErrorEndpointAndFix(args) {
-    const { original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
+    const { json_filename = "error.json", original_protocol_path = "/Users/gene/Developer/failed-protocol-5.py" } = args;
     
     try {
       const axios = (await import('axios')).default;
       const baseUrl = 'http://192.168.0.145:8080';
-      const directoryUrl = `${baseUrl}/reports/`;
+      const jsonUrl = `${baseUrl}/${json_filename}`;
       
-      console.error(`🔍 Looking for JSON error reports in ${directoryUrl}`);
+      console.error(`🔍 Fetching JSON error report: ${jsonUrl}`);
       
-      // Get all files from directory
-      const response = await fetch(directoryUrl);
+      // Fetch the specific JSON file
+      const response = await fetch(jsonUrl);
       if (!response.ok) {
-        throw new Error(`Failed to access directory: ${response.status}`);
+        throw new Error(`Failed to fetch ${json_filename}: ${response.status} ${response.statusText}`);
       }
       
-      const html = await response.text();
-      const allFiles = this.parseDirectoryListing(html);
+      let errorText = await response.text();
       
-      // Filter for JSON files only
-      const jsonFiles = allFiles.filter(file => file.toLowerCase().endsWith('.json'));
-      
-      if (jsonFiles.length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text: "❌ **No JSON error reports found** in /reports/"
-          }]
-        };
+      // Validate and pretty-print JSON
+      try {
+        const parsed = JSON.parse(errorText);
+        errorText = JSON.stringify(parsed, null, 2);
+        console.error(`✅ Successfully fetched and parsed ${json_filename}`);
+      } catch (parseError) {
+        throw new Error(`Invalid JSON in ${json_filename}: ${parseError.message}`);
       }
-      
-      console.error(`📄 Found ${jsonFiles.length} JSON files, analyzing for latest datetime...`);
-      
-      // Analyze each JSON file to find the one with highest datetime
-      let latestFile = null;
-      let latestDateTime = null;
-      let latestContent = null;
-      
-      for (const fileName of jsonFiles) {
-        try {
-          const fileUrl = `${directoryUrl}${fileName}`;
-          const fileResponse = await fetch(fileUrl);
-          const fileContent = await fileResponse.text();
-          
-          try {
-            const jsonData = JSON.parse(fileContent);
-            
-            // Look for datetime fields in various common formats
-            let fileDateTime = null;
-            const dateFields = ['datetime', 'timestamp', 'created_at', 'time', 'date', 'error_time'];
-            
-            for (const field of dateFields) {
-              if (jsonData[field]) {
-                fileDateTime = new Date(jsonData[field]);
-                break;
-              }
-            }
-            
-            // If no explicit datetime field, try to parse filename for datetime
-            if (!fileDateTime || isNaN(fileDateTime)) {
-              const dateMatch = fileName.match(/(\d{4}-\d{2}-\d{2}[\s_T]\d{2}:\d{2}:\d{2})/);
-              if (dateMatch) {
-                fileDateTime = new Date(dateMatch[1]);
-              }
-            }
-            
-            if (fileDateTime && !isNaN(fileDateTime) && (!latestDateTime || fileDateTime > latestDateTime)) {
-              latestDateTime = fileDateTime;
-              latestFile = fileName;
-              latestContent = JSON.stringify(jsonData, null, 2);
-            }
-            
-          } catch (parseError) {
-            console.error(`Failed to parse JSON in ${fileName}: ${parseError.message}`);
-          }
-        } catch (fetchError) {
-          console.error(`Failed to fetch ${fileName}: ${fetchError.message}`);
-        }
-      }
-      
-      if (!latestFile) {
-        return {
-          content: [{
-            type: "text",
-            text: `❌ **No valid JSON error reports found** - checked ${jsonFiles.length} files but none had valid datetime information`
-          }]
-        };
-      }
-      
-      console.error(`🚨 Processing latest JSON error report: ${latestFile} (${latestDateTime.toISOString()})`);
       
       // Get current run info and stop it
-      const robotIp = "98.42.130.34";
+      const robotIp = "192.168.0.83";
       let stopStatus = "⚠️ No running protocol found";
       let currentRunId = null;
       let lastCompletedStep = null;
@@ -2196,12 +2133,12 @@ Failed commands: ${failedCommands?.length || 0}`;
       
       // Read original protocol and generate fix
       const originalProtocol = fs.readFileSync(original_protocol_path, 'utf8');
-      const fixedProtocol = await this.generateFixedProtocol(latestContent, originalProtocol, lastCompletedStep, currentRunId);
+      const fixedProtocol = await this.generateFixedProtocol(errorText, originalProtocol, lastCompletedStep, currentRunId);
       
       return {
         content: [{
           type: "text",
-          text: `🚨 **LATEST JSON ERROR REPORT**: ${latestFile}\n**DateTime**: ${latestDateTime.toISOString()}\n\n📄 **CONTENT**:\n${latestContent}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
+          text: `🚨 **JSON ERROR REPORT**: ${json_filename}\n\n📄 **CONTENT**:\n${errorText}\n\n${stopStatus}\n\n🔧 **FIXED PROTOCOL**:\n\n\`\`\`python\n${fixedProtocol}\n\`\`\``
         }]
       };
       
@@ -2209,7 +2146,7 @@ Failed commands: ${failedCommands?.length || 0}`;
       return {
         content: [{
           type: "text",
-          text: `❌ **Analysis failed**: ${error.message}`
+          text: `❌ **Failed to fetch error report**: ${error.message}`
         }]
       };
     }
