@@ -219,6 +219,29 @@ class OpentronsMCP {
               },
               required: ["robot_ip"]
             }
+          },
+          {
+            name: "nats_listen_error_reception",
+            description: "Listen for error messages on error-reception channel and auto-fix protocols",
+            inputSchema: {
+              type: "object",
+              properties: {
+                timeout: { type: "number", default: 30000, description: "Timeout in milliseconds" }
+              }
+            }
+          },
+          {
+            name: "call_protocol_fixer",
+            description: "Fix protocol by continuing from last viable step",
+            inputSchema: {
+              type: "object",
+              properties: {
+                protocol_file_path: { type: "string", description: "Path to the original protocol file" },
+                error_context: { type: "string", description: "Plain text error context from nats listener" },
+                fixer_script_path: { type: "string", default: "./protocol_fixer.py", description: "Path to Python fixer script" }
+              },
+              required: ["protocol_file_path", "error_context"]
+            }
           }
         ]
       };
@@ -254,6 +277,10 @@ class OpentronsMCP {
           return this.controlLights(args);
         case "home_robot":
           return this.homeRobot(args);
+        case "nats_listen_error_reception":
+          return this.natsListenErrorReception(args);
+        case "call_protocol_fixer":
+          return this.callProtocolFixer(args);
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -2039,6 +2066,156 @@ class OpentronsMCP {
             text: `❌ Failed to home robot: ${error.message}`
           }
         ]
+      };
+    }
+  }
+
+  async natsListenErrorReception(args) {
+    const { timeout = 30000 } = args;
+    
+    try {
+      const { exec } = await import('child_process');
+      const { promisify } = await import('util');
+      const execAsync = promisify(exec);
+      
+      const listenerScript = `
+const { connect } = require('nats');
+async function listen() {
+  const nc = await connect();
+  const handler = async (msg) => {
+    console.log(msg.data.toString());
+    process.exit(0);
+  };
+  await nc.subscribe('error-reception', handler);
+  setTimeout(() => { console.error('TIMEOUT'); process.exit(1); }, ${timeout});
+}
+listen().catch(console.error);
+`;
+
+      const { stdout, stderr } = await execAsync(`node -e "${listenerScript}"`);
+      
+      if (stderr.includes('TIMEOUT')) {
+        return {
+          content: [{
+            type: "text",
+            text: `⏱️ **No error messages received** within ${timeout/1000}s`
+          }]
+        };
+      }
+      
+      const diagnostics_raw = stdout.trim();
+      
+      // extract robot info
+      const robotIpMatch = diagnostics_raw.match(/"robot_ip":\s*"([^"]+)"/);
+      const runIdMatch = diagnostics_raw.match(/"run_id":\s*"([^"]+)"/);
+      
+      const robot_ip = robotIpMatch?.[1];
+      const run_id = runIdMatch?.[1];
+      
+      let runInfo = '';
+      let currentStepInfo = '';
+      
+      if (robot_ip && run_id) {
+        try {
+          // get command info before stopping
+          const { exec: exec2 } = await import('child_process');
+          const { promisify: promisify2 } = await import('util');
+          const execAsync2 = promisify2(exec2);
+          
+          const cmdResponse = await execAsync2(`curl -s -H "Opentrons-Version: *" "http://${robot_ip}:31950/runs/${run_id}/commands?pageLength=10"`);
+          const cmdData = JSON.parse(cmdResponse.stdout);
+          
+          if (cmdData.data && cmdData.data.length > 0) {
+            const currentCmd = cmdData.data[cmdData.data.length - 1];
+            currentStepInfo = `Command: ${currentCmd.commandType} (${currentCmd.status})\n`;
+            currentStepInfo += `Step Index: ${cmdData.data.length - 1}\n`;
+            if (currentCmd.params) {
+              currentStepInfo += `Parameters: ${JSON.stringify(currentCmd.params)}\n`;
+            }
+            if (currentCmd.error) {
+              currentStepInfo += `Error: ${currentCmd.error.detail}\n`;
+            }
+          }
+          
+          // stop the run
+          await this.controlRun({ robot_ip, run_id, action: 'stop' });
+          runInfo = `Run ${run_id} stopped\n`;
+          
+        } catch (e) {
+          runInfo = `Error stopping run: ${e.message}\n`;
+        }
+      } else {
+        runInfo = `Could not extract robot/run info from diagnostics\n`;
+      }
+      
+      // plain text context string
+      const errorContext = `${runInfo}${currentStepInfo}Original diagnostics: ${diagnostics_raw}`;
+      
+      return {
+        content: [{
+          type: "text",
+          text: `🚨 **Error detected and run stopped**\n\n**Error Context**:\n\`\`\`\n${errorContext}\n\`\`\`\n\nCall \`call_protocol_fixer\` next with your protocol file path and this error context.`
+        }]
+      };
+      
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `❌ **NATS listener failed**: ${error.message}`
+        }]
+      };
+    }
+  }
+
+  async callProtocolFixer(args) {
+    const { protocol_file_path, error_context, fixer_script_path = "./protocol_fixer.py" } = args;
+    
+    try {
+      const { exec } = await import('child_process');
+      const { promisify } = await import('util');
+      const execAsync = promisify(exec);
+      
+      // write context to temp file
+      const fs = await import('fs');
+      const tmpFile = `/tmp/error_context_${Date.now()}.txt`;
+      fs.writeFileSync(tmpFile, error_context);
+      
+      const cmd = `python3 "${fixer_script_path}" --protocol-file "${protocol_file_path}" --error-context "${tmpFile}"`;
+      
+      const { stdout, stderr } = await execAsync(cmd, { timeout: 120000 });
+      
+      // cleanup
+      try { fs.unlinkSync(tmpFile); } catch {}
+      
+      if (stderr && !stderr.includes('INFO')) {
+        throw new Error(`Python script error: ${stderr}`);
+      }
+      
+      const result = JSON.parse(stdout.trim());
+      
+      if (result.success) {
+        return {
+          content: [{
+            type: "text",
+            text: `✅ **Fixed protocol generated**\n\n**File**: ${result.fixed_protocol_path}\n**Description**: ${result.description}\n\nReady to upload with \`upload_protocol\` tool.`
+          }]
+        };
+      } else {
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **Fix failed**: ${result.error}`
+          }]
+        };
+      }
+      
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `❌ **Fixer error**: ${error.message}`
+        }]
       };
     }
   }
