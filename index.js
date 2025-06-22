@@ -9,7 +9,7 @@ import {
 import fs from 'fs';
 import FormData from 'form-data';
 
-class OpentronsAPIAutomationServer {
+class OpentronsMCP {
   constructor() {
     this.server = new Server(
       {
@@ -1966,9 +1966,9 @@ class OpentronsAPIAutomationServer {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("Opentrons API Automation server running on stdio");
+    console.error("Opentrons MCP server running on stdio");
   }
 }
 
-const server = new OpentronsAPIAutomationServer();
+const server = new OpentronsMCP();
 server.run().catch(console.error);
