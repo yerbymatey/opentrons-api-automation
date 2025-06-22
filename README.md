@@ -138,6 +138,9 @@ Home robot axes or specific pipette.
 
 ### With Claude Desktop
 
+![Opentrons MCP in action](./images/chat.png)
+*Screenshot showing the Opentrons MCP server in action with Claude Desktop after asking for current protocols with opentrons for the Flex, give it the robot ip!*
+
 Once configured, you can use natural language to control your robot:
 
 **Upload a protocol:**
