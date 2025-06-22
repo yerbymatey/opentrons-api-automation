@@ -1541,7 +1541,7 @@ class OpentronsMCP {
       let curlCmd = `curl -X POST "http://${robot_ip}:31950/protocols"`;
       curlCmd += ` -H "Opentrons-Version: *"`;
       curlCmd += ` -H "accept: application/json"`;
-      curlCmd += ` -F "protocolFile=@${file_path}"`;
+      curlCmd += ` -F "files=@${file_path}"`;
       
       // Add support files
       for (const supportPath of support_files) {
