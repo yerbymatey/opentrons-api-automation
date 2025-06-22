@@ -19,7 +19,8 @@
   "author": "yerbymatey",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest"
+    "@modelcontextprotocol/sdk": "latest",
+    "nats": "^2.19.0"
   },
   "engines": {
     "node": ">=18.0.0"
