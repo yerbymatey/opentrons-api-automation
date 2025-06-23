@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server for Opentrons robot automation and API documentation. This tool provides both comprehensive API documentation and direct robot control capabilities for Opentrons Flex and OT-2 robots.
 
+<a href="https://glama.ai/mcp/servers/@yerbymatey/opentrons-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@yerbymatey/opentrons-mcp/badge" alt="Opentrons Server MCP server" />
+</a>
+
 ## Features
 
 ### API Documentation Tools
@@ -34,7 +38,7 @@ npm install
 
 Add to your Claude Desktop configuration file:
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
