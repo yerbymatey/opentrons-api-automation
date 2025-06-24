@@ -1,0 +1,18 @@
+0 verbose cli /opt/homebrew/Cellar/node/23.10.0_1/bin/node /opt/homebrew/bin/npm
+1 info using npm@10.9.2
+2 info using node@v23.10.0
+3 silly config load:file:/opt/homebrew/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/gene/Developer/opentrons-mcp/.npmrc
+5 silly config load:file:/Users/gene/.npmrc
+6 silly config load:file:/opt/homebrew/etc/npmrc
+7 verbose title npm clean
+8 verbose argv "clean" "--cache" "--force"
+9 verbose logfile logs-max:10 dir:/Users/gene/Developer/opentrons-mcp/--force/_logs/2025-06-22T19_10_54_611Z-
+10 verbose logfile /Users/gene/Developer/opentrons-mcp/--force/_logs/2025-06-22T19_10_54_611Z-debug-0.log
+11 silly logfile done cleaning log files
+12 verbose cwd /Users/gene/Developer/opentrons-mcp
+13 verbose os Darwin 24.5.0
+14 verbose node v23.10.0
+15 verbose npm  v10.9.2
+16 verbose exit 1
+17 verbose code 1
